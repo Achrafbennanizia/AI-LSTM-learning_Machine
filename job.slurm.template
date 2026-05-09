@@ -1,0 +1,92 @@
+#!/bin/bash
+# Generiert aus job.slurm.template via: python3 scripts/render_job_slurm.py
+# HiPer-Anleitung: GPUs — --gres=gpu:<gpu_type>:<num_gpus>
+#
+#SBATCH --job-name=guitarai_training
+#SBATCH --output=logs/guitarai_%j.out
+#SBATCH --error=logs/guitarai_%j.err
+#SBATCH --time=@@SLURM_TIME_LIMIT@@
+#SBATCH --partition=@@SLURM_PARTITION@@
+#SBATCH --account=@@SLURM_ACCOUNT@@
+#SBATCH --gres=@@SLURM_GRES@@
+#SBATCH --mem=@@SLURM_MEM@@
+#SBATCH --cpus-per-task=@@SLURM_CPUS_PER_TASK@@
+#SBATCH --mail-type=@@SLURM_MAIL_TYPE@@
+#SBATCH --mail-user=@@SLURM_MAIL_USER@@
+
+# Netzwerk: für große CSV (z.B. ~20k Zeilen Multi-Nutzer).
+# Datensatz zuerst erzeugen, z.B. Login-Node:
+#   python3 data/leo_story_generator.py --users-per-type 100,100,100,100 \
+#       --sessions-per-user 50 --stem full_dataset_20k --seed 42 --no-copy-downloads
+
+set -euo pipefail
+
+echo "======================================"
+echo "Job ID:     $SLURM_JOB_ID"
+echo "Node:       $SLURMD_NODENAME"
+echo "Start:      $(date)"
+echo "======================================"
+
+cd "$SLURM_SUBMIT_DIR"
+
+export GUITARAI_DATA_DIR="${SLURM_SUBMIT_DIR}/data"
+DATA_CSV="${SLURM_SUBMIT_DIR}/data/full_dataset_20k.csv"
+export GUITARAI_DATA="${DATA_CSV}"
+
+mkdir -p logs checkpoints runs
+
+if [[ ! -f "${DATA_CSV}" ]]; then
+  echo "FEHLER: ${DATA_CSV} fehlt — zuerst Generator ausführen (siehe Kommentare oben)." >&2
+  exit 1
+fi
+echo "Daten-CSV: ${DATA_CSV}  ($(wc -l < "${DATA_CSV}") Zeilen)"
+
+VENV_PY="${SLURM_SUBMIT_DIR}/.venv/bin/python"
+if [[ ! -x "$VENV_PY" ]]; then
+  echo "FEHLER: $VENV_PY fehlt — bitte venv auf dem Login-Node erstellen." >&2
+  exit 1
+fi
+
+if type module &>/dev/null; then
+  module try-load python/3.10 2>/dev/null || true
+fi
+
+"$VENV_PY" - <<'PY'
+import torch
+print(f"CUDA (Batch-Step nach Node-Allocation): {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+PY
+
+JR_ACC="${SLURM_JOB_ACCOUNT:-${SLURM_JOB_ACCOUNT_FALLBACK:-${SLURM_ACCOUNT}}}"
+CPUS="${SLURM_CPUS_PER_TASK:-4}"
+
+srun --unbuffered \
+  --ntasks=1 \
+  --cpus-per-task="${CPUS}" \
+  --account="${JR_ACC}" \
+  "$VENV_PY" train.py \
+    --data       "${DATA_CSV}" \
+    --epochs     300 \
+    --batch_size 32 \
+    --lr         0.0005 \
+    --seq_len    5 \
+    --hidden     64 \
+    --lstm_layers 1 \
+    --head_hidden 64 \
+    --cls_hidden "128,72,48" \
+    --save_dir   checkpoints \
+    --log_dir    runs
+
+srun --unbuffered \
+  --ntasks=1 \
+  --cpus-per-task="${CPUS}" \
+  --account="${JR_ACC}" \
+  "$VENV_PY" evaluate.py
+
+echo "======================================"
+echo "TensorBoard Events unter: ${SLURM_SUBMIT_DIR}/runs/"
+echo 'Auf dem Login-Node: .venv/bin/pip install -r requirements.txt  # falls tensorboard fehlt'
+echo 'TensorBoard UI: cd '"$SLURM_SUBMIT_DIR"' && .venv/bin/tensorboard --logdir runs --samples_per_plugin=scalars=10000000'
+echo "(Optional SSH-Tunnel vom Laptop): ssh -L 6006:localhost:6006 \$USER@\$(hostname) ..."
+echo "======================================"

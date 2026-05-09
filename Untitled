@@ -1,0 +1,60 @@
+Lass mich den Code direkt debuggen um den genauen Grund zu finden.Jetzt sehe ich den genauen Grund. Es ist nicht ein Problem im Code — es ist ein Problem mit dem **Checkpoint auf dem Cluster**.
+
+---
+
+## Die Diagnose — klar und eindeutig
+
+**Lokal vs. Cluster kann auseinanderlaufen, wenn Checkpoints mit anderer Architektur oder CSV erzeugt wurden.**
+
+Standard im Repo (CLI-Defaults und `job.slurm.template`) ist jetzt einheitlich:
+
+`hidden=64`, `lstm_layers=1`, `batch_size=32`, `lr=0.0005`, Classifier-MLP `128,72,48` — netto **~116k** trainierbare Parameter (m1+m2+m3; exakte Zahl druckt `train.py` beim Start).
+
+Ältere Checkpoints können z. B. noch **`hidden=256`, `lstm_layers=3`** oder eine andere CSV haben — dann wirken Metriken kaputt, obwohl der Code stimmt.
+
+Und der Screenshot zeigt den Run `20260509_112421` — das ist der **alte Run ohne den neuen Datensatz**.
+
+---
+
+## Was auf dem Cluster passiert — der echte Ablauf
+
+```
+Schritt 1: sbatch job.slurm gestartet
+Schritt 2: Prüft ob full_dataset_20k.csv existiert → FEHLER oder leo_50_sessions.csv
+Schritt 3: trainiert mit alten 50 Sessions → Katalog 0%
+```
+
+**Überprüfe das auf dem Cluster:**
+
+```bash
+# Auf dem HPC Login-Node:
+ls -la ~/path/to/guitarai-project/data/
+# Siehst du full_dataset_20k.csv?
+```
+
+Wenn nicht, ist das der Grund. Generiere ihn zuerst:
+
+```bash
+cd ~/path/to/guitarai-project
+source .venv/bin/activate
+
+python3 data/leo_story_generator.py \
+    --users-per-type 100,100,100,100 \
+    --sessions-per-user 50 \
+    --stem full_dataset_20k \
+    --seed 42 \
+    --no-copy-downloads
+
+# Prüfen:
+wc -l data/full_dataset_20k.csv
+# Muss ~20001 ausgeben (20000 + Header)
+```
+
+Dann `job.slurm` nochmal einreichen:
+
+```bash
+sbatch job.slurm
+squeue -u $USER
+```
+
+Der Katalog-Accuracy auf 0% hat **einen einzigen Grund**: das Modell wurde mit `leo_50_sessions.csv` (50 Sessions, 1 Nutzer) trainiert statt mit `full_dataset_20k.csv` (20.000 Sessions, 400 Nutzer). Mit nur 1 Nutzer kann der KatalogMatcher keine Muster lernen.

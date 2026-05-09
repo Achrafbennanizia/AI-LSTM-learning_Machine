@@ -1,0 +1,30 @@
+# Lokale Secrets / persönliche Slurm-Generierung
+.env
+job.slurm
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Training / große Artefakte
+checkpoints/
+runs/**/events.out.tfevents.*
+*.pt
+*.pth
+
+# Binaries / Zips vom Rechner
+Archive.zip
+
+# Editor
+.DS_Store
+.idea/
+.vscode/
+
+# Optional: große synthetische Datensätze nicht mitversionieren
+# data/full_dataset_20k.csv
+# data/leo_50_sessions.csv
+# data/leo_50_sessions.json
