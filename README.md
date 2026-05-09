@@ -80,12 +80,14 @@ Das Template enthält konkrete `train.py`-Argumente (u. a. Epochen, LR, Hidden
 train.py           # Training, Dataset, Checkpointing, TensorBoard
 evaluate.py        # Confusion Matrix, Reports, kleine Demo
 paths.py           # Auflösung CSV-Pfad über Env/Defaults
-models/            # LSTM, Classifier, Katalogmatcher
+models/            # LSTM, GRU, MLP-Kopf, DQN, Classifier, Katalogmatcher
 scripts/render_job_slurm.py   # `.env` + `job.slurm.template` → `job.slurm`
 data/leo_story_generator.py   # Synthetische / skalierbare Datensatz-Erzeugung
+research/          # Forschung: Vergleich, Forgetting, io_layout
+research_outputs/  # (gitignored außer README) TB + Artefakte + CSV-Exporte
 ```
 
----
+**Forschung:** `research/README_research.md` — Architekturvergleich, Forgetting, zentrale Ausgabe unter `research_outputs/`.
 
 ## Referenz-Konventionen
 

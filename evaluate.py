@@ -92,7 +92,25 @@ if _trained:
 print(f"Eval-CSV: {data_csv}")
 
 df = pd.read_csv(data_csv)
-ds  = LeoDataset(df, seq_len=5)
+if ckpt.get("degenerate_test_is_train"):
+    print(
+        "Hinweis: Checkpoint mit --allow-train-as-test (Validierung = Training) — "
+        "Holdout-Filter wird übersprungen."
+    )
+_test_users = ckpt.get("test_user_ids")
+if _test_users:
+    holdout = set(_test_users)
+    n_before = len(df)
+    df = df[df["nutzer_id"].isin(holdout)].copy()
+    print(
+        f"Holdout-Eval: {len(holdout)} Test-Nutzer aus Checkpoint "
+        f"(split_seed={ckpt.get('split_seed', '—')}) → {len(df)} von {n_before} Sessions."
+    )
+ds = LeoDataset(df, seq_len=5)
+if len(ds) == 0:
+    raise SystemExit(
+        "Keine Eval-Fenster (seq_len=5): zu wenige Sessions pro Nutzer oder leeres DataFrame — CSV prüfen."
+    )
 
 # ── Confusion Matrix (Übungstyp) ──────────────────────────────────────────────
 y_true, y_pred_k, y_pred_kat = [], [], []

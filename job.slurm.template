@@ -41,11 +41,15 @@ if [[ ! -f "${DATA_CSV}" ]]; then
 fi
 echo "Daten-CSV: ${DATA_CSV}  ($(wc -l < "${DATA_CSV}") Zeilen)"
 
-VENV_PY="${SLURM_SUBMIT_DIR}/.venv/bin/python"
-if [[ ! -x "$VENV_PY" ]]; then
-  echo "FEHLER: $VENV_PY fehlt — bitte venv auf dem Login-Node erstellen." >&2
+if [[ -x "${SLURM_SUBMIT_DIR}/guitarai_env/bin/python" ]]; then
+  VENV_PY="${SLURM_SUBMIT_DIR}/guitarai_env/bin/python"
+elif [[ -x "${SLURM_SUBMIT_DIR}/.venv/bin/python" ]]; then
+  VENV_PY="${SLURM_SUBMIT_DIR}/.venv/bin/python"
+else
+  echo "FEHLER: Weder guitarai_env noch .venv mit python gefunden." >&2
   exit 1
 fi
+echo "Python: ${VENV_PY}"
 
 if type module &>/dev/null; then
   module try-load python/3.10 2>/dev/null || true

@@ -105,6 +105,30 @@ def main() -> int:
     args.output.write_text(text, encoding="utf-8")
     args.output.chmod(args.output.stat().st_mode | 0o111)
     print(f"Wrote {args.output}")
+
+    research_tpl = ROOT / "job_research.slurm.template"
+    research_out = ROOT / "job_research.slurm"
+    if research_tpl.is_file():
+        rt = research_tpl.read_text(encoding="utf-8")
+        for k in sorted(_KEYS, key=len, reverse=True):
+            rt = rt.replace("@@%s@@" % k, env[k])
+        leftover_r = set(re.findall(r"@@([A-Z0-9_]+)@@", rt))
+        if leftover_r - _KEYS:
+            print(f"Research template unknown placeholders: {leftover_r}", file=sys.stderr)
+            return 1
+        inj_r = [
+            "",
+            "# --- aus .env bei `render_job_slurm.py` eingefügt ---",
+            f"export SLURM_ACCOUNT={shlex.quote(acc)}",
+            f"export SLURM_JOB_ACCOUNT_FALLBACK={shlex.quote(fb)}",
+            "# ---",
+            "",
+        ]
+        rt = rt.replace(marker, marker + "\n" + "\n".join(inj_r), 1)
+        research_out.write_text(rt, encoding="utf-8")
+        research_out.chmod(research_out.stat().st_mode | 0o111)
+        print(f"Wrote {research_out}")
+
     return 0
 
 

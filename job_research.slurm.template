@@ -1,0 +1,103 @@
+#!/bin/bash
+# Generiert: python3 scripts/render_job_slurm.py --template job_research.slurm.template -o job_research.slurm
+# Architekturvergleich (MLP / LSTM / GRU; DQN optional) + Forgetting-Benchmark.
+# TensorBoard / Artefakte: research_outputs/ (siehe research_outputs/README.txt)
+#
+#SBATCH --job-name=guitarai_research
+#SBATCH --output=logs/guitarai_research_%j.out
+#SBATCH --error=logs/guitarai_research_%j.err
+#SBATCH --time=@@SLURM_TIME_LIMIT@@
+#SBATCH --partition=@@SLURM_PARTITION@@
+#SBATCH --account=@@SLURM_ACCOUNT@@
+#SBATCH --gres=@@SLURM_GRES@@
+#SBATCH --mem=@@SLURM_MEM@@
+#SBATCH --cpus-per-task=@@SLURM_CPUS_PER_TASK@@
+#SBATCH --mail-type=@@SLURM_MAIL_TYPE@@
+#SBATCH --mail-user=@@SLURM_MAIL_USER@@
+
+set -euo pipefail
+
+echo "======================================"
+echo "GuitarAI RESEARCH  Job ID: $SLURM_JOB_ID"
+echo "Node:       $SLURMD_NODENAME"
+echo "Start:      $(date)"
+echo "======================================"
+
+cd "$SLURM_SUBMIT_DIR"
+
+export GUITARAI_DATA_DIR="${SLURM_SUBMIT_DIR}/data"
+DATA_CSV="${SLURM_SUBMIT_DIR}/data/full_dataset_20k.csv"
+export GUITARAI_DATA="${DATA_CSV}"
+
+mkdir -p logs \
+  research_outputs/tensorboard/compare \
+  research_outputs/tensorboard/forgetting \
+  research_outputs/artifacts/compare \
+  research_outputs/artifacts/forgetting \
+  research_outputs/exports
+
+if [[ ! -f "${DATA_CSV}" ]]; then
+  echo "FEHLER: ${DATA_CSV} fehlt — Generator auf Login-Node ausführen." >&2
+  exit 1
+fi
+echo "Daten: ${DATA_CSV}  ($(wc -l < "${DATA_CSV}") Zeilen)"
+
+if [[ -x "${SLURM_SUBMIT_DIR}/guitarai_env/bin/python" ]]; then
+  VENV_PY="${SLURM_SUBMIT_DIR}/guitarai_env/bin/python"
+elif [[ -x "${SLURM_SUBMIT_DIR}/.venv/bin/python" ]]; then
+  VENV_PY="${SLURM_SUBMIT_DIR}/.venv/bin/python"
+else
+  echo "FEHLER: Weder guitarai_env noch .venv mit python gefunden." >&2
+  exit 1
+fi
+echo "Python: ${VENV_PY}"
+
+if type module &>/dev/null; then
+  module try-load python/3.10 2>/dev/null || true
+fi
+
+"$VENV_PY" - <<'PY'
+import torch
+print(f"CUDA: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+PY
+
+JR_ACC="${SLURM_JOB_ACCOUNT:-${SLURM_JOB_ACCOUNT_FALLBACK:-${SLURM_ACCOUNT}}}"
+CPUS="${SLURM_CPUS_PER_TASK:-4}"
+
+echo ""
+echo "=== (1/2) Architekturvergleich — train_compare.py ==="
+srun --unbuffered \
+  --ntasks=1 \
+  --cpus-per-task="${CPUS}" \
+  --account="${JR_ACC}" \
+  "$VENV_PY" research/train_compare.py \
+    --data "${DATA_CSV}" \
+    --pretrain_epochs    35 \
+    --n_incremental_tasks 8 \
+    --incremental_epochs  3 \
+    --batch_size 32 \
+    --lr 0.0005 \
+    --skip_dqn
+
+echo ""
+echo "=== (2/2) Forgetting-Benchmark — benchmark_forgetting.py ==="
+srun --unbuffered \
+  --ntasks=1 \
+  --cpus-per-task="${CPUS}" \
+  --account="${JR_ACC}" \
+  "$VENV_PY" research/benchmark_forgetting.py \
+    --data "${DATA_CSV}" \
+    --pretrain_epochs    25 \
+    --n_tasks            6 \
+    --incremental_epochs 2 \
+    --batch_size 32
+
+echo ""
+echo "======================================"
+echo "Research fertig: $(date)"
+echo "TensorBoard (Vergleich):  tensorboard --logdir ${SLURM_SUBMIT_DIR}/research_outputs/tensorboard/compare --samples_per_plugin=scalars=10000000"
+echo "TensorBoard (Forgetting): tensorboard --logdir ${SLURM_SUBMIT_DIR}/research_outputs/tensorboard/forgetting --samples_per_plugin=scalars=10000000"
+echo "CSV-Exporte: ${SLURM_SUBMIT_DIR}/research_outputs/exports/"
+echo "======================================"

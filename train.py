@@ -29,6 +29,35 @@ FEATURE_COLS = [
 # TensorBoard UI downsamples scalars per tag by default (~1k–10k); raise for full-length curves.
 TENSORBOARD_SCALAR_SAMPLES = 10_000_000
 
+# Gleiche Gewichtung in Train / Val / EWC-Fisher (MSE auf [0,1] sonst von CE übertönt).
+FEHLER_LSTM_WEIGHT = 0.5
+KATALOG_LOSS_WEIGHT = 0.8
+
+# Ab ~wenigen hundert Fenstern wird das 3-Köpfe-Setup erst sinnvoll stabil.
+MIN_TRAIN_WINDOWS_RECOMMENDED = 500
+
+
+def train_test_split_by_user(
+    df: pd.DataFrame,
+    *,
+    user_col: str = "nutzer_id",
+    train_frac: float = 0.8,
+    seed: int = 42,
+) -> tuple[pd.DataFrame, pd.DataFrame, set, set]:
+    """80/20 nach Nutzer: kein Nutzer in Train- und Testset gleichzeitig."""
+    uids = df[user_col].unique().tolist()
+    rng = np.random.default_rng(seed)
+    rng.shuffle(uids)
+    n_users = len(uids)
+    n_train = max(1, int(round(n_users * train_frac)))
+    if n_users > 1 and n_train >= n_users:
+        n_train = n_users - 1
+    train_u = set(uids[:n_train])
+    test_u = set(uids[n_train:])
+    df_tr = df[df[user_col].isin(train_u)].copy()
+    df_te = df[df[user_col].isin(test_u)].copy()
+    return df_tr, df_te, train_u, test_u
+
 
 def tensorboard_launch_cmd(log_dir: str) -> str:
     root = os.path.abspath(log_dir)
@@ -98,7 +127,9 @@ def main():
     parser.add_argument(
         "--data",
         default=resolve_training_csv(),
-        help="Pfad CSV ($GUITARAI_DATA/_DIR oder data/leo_50_sessions.csv im Repo)",
+        help=(
+            "Pfad CSV — siehe paths.py: GUITARAI_DATA oder GUITARAI_DATA_DIR, sonst data/leo_50_sessions.csv"
+        ),
     )
     parser.add_argument("--epochs",     type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=32)
@@ -124,7 +155,7 @@ def main():
     parser.add_argument("--katalog_mlp_blocks", type=int, default=2, help=">=1 ReLU-Blöcke pro Encoder")
     parser.add_argument("--katalog_dropout", type=float, default=0.2)
     parser.add_argument("--device",     default="auto")
-    parser.add_argument("--save_dir",   default="checkpoints")
+    parser.add_argument("--save_dir", default="checkpoints", help="Checkpoints — relativ zum Repo, wenn kein absoluter Pfad")
     parser.add_argument(
         "--num_workers",
         type=int,
@@ -139,7 +170,7 @@ def main():
     parser.add_argument(
         "--log_dir",
         default="runs",
-        help="TensorBoard Basisordner (pro Lauf Unterordner, siehe --run_name)",
+        help="TensorBoard Basisordner — relativ zum Repo (wo train.py liegt), nicht zum aktuellen Shell-CWD",
     )
     parser.add_argument(
         "--run_name",
@@ -156,7 +187,28 @@ def main():
         action="store_true",
         help="TensorBoard: keine Scalars pro Minibatch (Xs-Achse fällt auf ~Anzahl Epochen zurück)",
     )
+    parser.add_argument(
+        "--split-seed",
+        type=int,
+        default=42,
+        help="Zufallssamen für 80/20 Nutzer-Split (kein User-Leakage zwischen Train/Test)",
+    )
+    parser.add_argument(
+        "--allow-train-as-test",
+        action="store_true",
+        help=(
+            "Nur für Demos: wenn es 0 echte Test-Fenster gibt, Test = Train fortfahren "
+            "(Metriken ungültig — Standard ist Abbruch mit Fehlermeldung)."
+        ),
+    )
     args = parser.parse_args()
+
+    # Relative Pfade zum Repo (train.py): sonst landet runs/ im CWD und TensorBoard am Projekt sieht nichts.
+    _repo_root = os.path.dirname(os.path.abspath(__file__))
+    if not os.path.isabs(args.log_dir):
+        args.log_dir = os.path.normpath(os.path.join(_repo_root, args.log_dir))
+    if not os.path.isabs(args.save_dir):
+        args.save_dir = os.path.normpath(os.path.join(_repo_root, args.save_dir))
 
     if args.katalog_mlp_blocks < 1:
         raise SystemExit("--katalog_mlp_blocks muss >= 1 sein")
@@ -180,23 +232,38 @@ def main():
     print(f"CSV:       {args.data}")
     print(f"Datensatz: {len(df)} Sessions, {df['nutzer_id'].nunique()} Nutzer")
 
-    # Train/Test Split auf Session-Ebene (bei wenigen Nutzern)
-    n = len(df); split = int(n * 0.8)
-    df_train = df.iloc[:split]; df_test = df.iloc[split:]
+    # Train/Test nach Nutzer (kein identischer User in beiden Sets)
+    df_train, df_test, train_users, test_users = train_test_split_by_user(
+        df, seed=args.split_seed
+    )
+    print(
+        f"Split: {len(train_users)} Nutzer Train / {len(test_users)} Nutzer Test "
+        f"(split_seed={args.split_seed})"
+    )
 
     ds_train = LeoDataset(df_train, args.seq_len)
     ds_test  = LeoDataset(df_test,  args.seq_len)
+    test_eval_is_train = False
     if len(ds_train) == 0:
         raise SystemExit(
             f"Keine Trainingsfenster (seq_len={args.seq_len}): "
             "pro Nutzer mindestens seq_len+1 Sessions nötig, CSV prüfen."
         )
     if len(ds_test) == 0:
+        if not args.allow_train_as_test:
+            raise SystemExit(
+                "Abbruch: 0 Test-Fenster (Nutzer-Split 80/20: zu wenige/keine Holdout-Nutzer oder "
+                "zu wenige Sessions pro Testnutzer für seq_len).\n"
+                "  → Mehr Nutzer erzeugen, z.B.:\n"
+                "     python data/leo_story_generator.py --users-per-type 20,20,20,20,20 "
+                "--sessions-per-user 50\n"
+                "  → Nur für bewusst ungültige Demos: train.py --allow-train-as-test"
+            )
         print(
-            "Warnung: 0 Test-Samples (Zeilen-Split klein oder Nutzer ohne Fenster im Testteil). "
-            "Validierung nutzt gleiche Fenster wie Training — für echtes Testset Nutzer-/Session-Split erwägt."
+            "WARNUNG --allow-train-as-test: Test-Metriken = Train — keine Generalisierung messbar."
         )
-        ds_test = ds_train  # Crash vermeiden; Metriken entsprechend vorsichtig interpretieren
+        ds_test = ds_train
+        test_eval_is_train = True
 
     if args.num_workers < 0:
         try:
@@ -217,6 +284,13 @@ def main():
     dl_train = DataLoader(ds_train, shuffle=True, **dl_kw)
     dl_test  = DataLoader(ds_test, shuffle=False, **dl_kw)
     print(f"Train: {len(ds_train)} Samples | Test: {len(ds_test)} Samples")
+    if len(ds_train) < MIN_TRAIN_WINDOWS_RECOMMENDED:
+        print(
+            f"Hinweis: Nur {len(ds_train)} Trainingsfenster (empfohlen: ≥{MIN_TRAIN_WINDOWS_RECOMMENDED}+). "
+            "Wenig Daten + großes 3-Kopf-Netz führt oft zu flachen Loss-Kurven / Unteranpassung. "
+            "Cohort: python data/leo_story_generator.py --users-per-type 100,100,100,100 "
+            "--sessions-per-user 50"
+        )
     arch = {
         "n_features": len(FEATURE_COLS),
         "hidden": args.hidden,
@@ -228,6 +302,8 @@ def main():
         "katalog_hidden": args.katalog_hidden,
         "katalog_mlp_blocks": args.katalog_mlp_blocks,
         "katalog_dropout": args.katalog_dropout,
+        "fehler_lstm_weight": FEHLER_LSTM_WEIGHT,
+        "katalog_loss_weight": KATALOG_LOSS_WEIGHT,
     }
     print(
         "Architektur:",
@@ -277,16 +353,19 @@ def main():
         run_id = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
         tb_root = os.path.join(args.log_dir, run_id)
         os.makedirs(tb_root, exist_ok=True)
-        tb_writer = SummaryWriter(log_dir=tb_root)
+        # flush_secs klein: Events sichtbar ohne auf Epochenende zu warten (HPC/NFS, lange Epoche 1).
+        tb_writer = SummaryWriter(log_dir=tb_root, flush_secs=5, max_queue=50)
         tb_abs = os.path.abspath(tb_root)
-        print(f"TensorBoard logdir: {tb_root}")
-        print(f"  → {tensorboard_launch_cmd(args.log_dir)}")
+        print(f"TensorBoard Schreibpfad (exakt):\n  {tb_abs}")
+        print(f"TensorBoard lesen (ein Lauf): {tensorboard_single_run_cmd(tb_abs)}")
+        print(f"TensorBoard lesen (alle unter log_dir): {tensorboard_launch_cmd(args.log_dir)}")
         # Sofort erste Events schreiben (sonst leeres runs/ bis Epoche 1 fertig / bei Abbruch keine Datei)
         tb_writer.add_text(
             "hparams/overview",
             f"data={args.data}, epochs={args.epochs}, batch={args.batch_size}, lr={args.lr}, "
-            f"seq_len={args.seq_len}, arch={json.dumps(arch)}, device={device}, "
-            f"tensorboard_scalar_step=batch_index (cumul. Minibatches)",
+            f"seq_len={args.seq_len}, arch={json.dumps(arch)}, device={device}; "
+            f"TB: loss/train_batch auf kumul. Minibatch-Step; "
+            f"loss/train_total, loss/test_total, accuracy/*, optim/lr auf Epoche (gemeinsame X-Achse).",
             0,
         )
         tb_writer.add_scalar("meta/training_started", 1.0, 0)
@@ -308,10 +387,11 @@ def main():
     # ─── EWC (Elastic Weight Consolidation) ───────────────────────────────────
     class EWC:
         """Schützt wichtige Gewichte gegen Catastrophic Forgetting"""
+
         def __init__(self, models, dataloader, device, lambda_ewc=0.4):
             self.lambda_ewc = lambda_ewc
-            self.device     = device
-            self.fisher     = {}
+            self.device = device
+            self.fisher = {}
             self.params_old = {}
             self._compute_fisher(models, dataloader)
 
@@ -321,40 +401,56 @@ def main():
                 for pname, p in m.named_parameters():
                     all_params[f"{name}.{pname}"] = p
 
-            # Fisher Information: Gradient² über Trainingsdaten
             for key, p in all_params.items():
                 self.fisher[key] = torch.zeros_like(p)
 
-            for x, yf, yk, ykat in dataloader:
-                x, yf = x.to(device), yf.to(device)
-                yk, ykat = yk.to(device), ykat.to(device)
-                vorhersage, hidden = models["m1"](x)
-                klasse_logits      = models["m2"](vorhersage, hidden)
-                kat_scores         = models["m3"](vorhersage, klasse_logits, katalog_matrix)
-                loss = (mse(vorhersage, yf) +
-                        ce(klasse_logits, yk) +
-                        ce_k(kat_scores, ykat))
-                loss.backward()
-                for key, p in all_params.items():
-                    if p.grad is not None:
-                        self.fisher[key] += p.grad.data ** 2
+            was_training = {n: m.training for n, m in models.items()}
+            for m in models.values():
+                m.eval()
 
-            n = len(dataloader)
+            try:
+                for x, yf, yk, ykat in dataloader:
+                    for m in models.values():
+                        m.zero_grad(set_to_none=True)
+                    x, yf = x.to(device), yf.to(device)
+                    yk, ykat = yk.to(device), ykat.to(device)
+                    # Fisher wie Trainingsziel (kein AMP): stabile Diagonale, kein Dropout
+                    vorhersage, hidden = models["m1"](x)
+                    klasse_logits = models["m2"](vorhersage, hidden)
+                    kat_scores = models["m3"](vorhersage, klasse_logits, katalog_matrix)
+                    loss = (
+                        FEHLER_LSTM_WEIGHT * mse(vorhersage, yf)
+                        + ce(klasse_logits, yk)
+                        + KATALOG_LOSS_WEIGHT * ce_k(kat_scores, ykat)
+                    )
+                    loss.backward()
+                    for key, p in all_params.items():
+                        if p.grad is not None:
+                            self.fisher[key] += p.grad.detach() ** 2
+            finally:
+                for n, m in models.items():
+                    m.train(was_training[n])
+
+            n_batches = max(1, len(dataloader))
             for key in self.fisher:
-                self.fisher[key] /= n
-                self.params_old[key] = all_params[key].data.clone()
+                self.fisher[key] /= n_batches
+                self.params_old[key] = all_params[key].detach().clone()
 
         def penalty(self, models):
-            loss = 0.0
+            total = None
             all_params = {}
             for name, m in models.items():
                 for pname, p in m.named_parameters():
                     all_params[f"{name}.{pname}"] = p
 
             for key, p in all_params.items():
-                if key in self.fisher:
-                    loss += (self.fisher[key] * (p - self.params_old[key]) ** 2).sum()
-            return self.lambda_ewc * loss
+                if key not in self.fisher:
+                    continue
+                term = (self.fisher[key] * (p - self.params_old[key]) ** 2).sum()
+                total = term if total is None else total + term
+            if total is None:
+                return torch.tensor(0.0, device=self.device)
+            return self.lambda_ewc * total
 
     # ─── Training Loop ────────────────────────────────────────────────────────
     history = {"train_loss":[], "test_loss":[], "test_acc_klasse":[], "test_acc_katalog":[]}
@@ -363,7 +459,7 @@ def main():
     best_test_loss = float("inf")
 
     print("\n=== TRAINING STARTET ===")
-    # TensorBoard-Schritte auf kumulierter Minibatch-Nummer (= feine Kurven, nicht nur Epochen)
+    # Nur loss/train_batch: kumulierter Minibatch-Index. Epochen-Metriken nutzen step=Epoche.
     tb_global_step = 0
     for epoch in range(1, args.epochs + 1):
 
@@ -386,7 +482,8 @@ def main():
                 loss_klasse    = ce(klasse_logits, yk)       # Übungstyp
                 loss_katalog   = ce_k(kat_scores, ykat)      # Katalog-Auswahl
 
-                loss = loss_lstm + loss_klasse + 0.8 * loss_katalog
+                loss_mse_w = FEHLER_LSTM_WEIGHT * loss_lstm
+                loss = loss_mse_w + loss_klasse + KATALOG_LOSS_WEIGHT * loss_katalog
 
                 # EWC Penalty nach Epoche 20
                 if ewc is not None:
@@ -405,8 +502,14 @@ def main():
             train_loss += loss.item()
 
             if tb_writer is not None and not args.no_tb_batch_scalars:
-                tb_writer.add_scalar("loss/train_batch", loss.detach().item(), tb_global_step)
+                tb_writer.add_scalar(
+                    "loss/train_batch",
+                    float(loss.detach().item()),
+                    int(tb_global_step),
+                )
                 tb_global_step += 1
+                if tb_global_step % 20 == 0:
+                    tb_writer.flush()
 
         train_loss /= len(dl_train)
 
@@ -432,9 +535,11 @@ def main():
                     klasse_logits      = m2(vorhersage, hidden)
                     kat_scores         = m3(vorhersage, klasse_logits, katalog_matrix)
 
-                    loss = (mse(vorhersage, yf) +
-                            ce(klasse_logits, yk) +
-                            ce_k(kat_scores, ykat))
+                    loss = (
+                        FEHLER_LSTM_WEIGHT * mse(vorhersage, yf)
+                        + ce(klasse_logits, yk)
+                        + KATALOG_LOSS_WEIGHT * ce_k(kat_scores, ykat)
+                    )
                     test_loss += loss.item()
 
                 # FP32 für Metriken: unter CUDA+AMP können FP16-Logits bei argmax/== keine Treffer zeigen → TB bleibt fälschlich bei 0
@@ -457,18 +562,18 @@ def main():
         history["test_acc_klasse"].append(acc_k)
         history["test_acc_katalog"].append(acc_kat)
 
-        # tb_step = kumulierte Minibatches (kurven haben Epochen×batches Punkte); mit --no_tb_batch_scalars: Epoche als X-Achse
+        # Epochen-Metriken immer global_step=Epoche (gemeinsame X-Achse in TensorBoard).
+        # Nur loss/train_batch nutzt kumul. Minibatch-Index (eigener Kurven-Plot).
         if tb_writer is not None:
-            tb_step = tb_global_step if not args.no_tb_batch_scalars else epoch
-            tb_writer.add_scalar("loss/train_total", train_loss, tb_step)
-            tb_writer.add_scalar("loss/test_total", test_loss, tb_step)
-            tb_writer.add_scalar("accuracy/test_uebungstyp", acc_k / 100.0, tb_step)
-            tb_writer.add_scalar("accuracy/test_katalog", acc_kat / 100.0, tb_step)
-            # Gleiche Kennzahlen mit Epoche als X-Achse + Prozent 0–100 (TensorBoard-Verwechslungen vermeiden)
-            tb_writer.add_scalar("epoch/acc_test_uebungstyp_pct", acc_k, epoch)
-            tb_writer.add_scalar("epoch/acc_test_katalog_pct", acc_kat, epoch)
+            ep = int(epoch)
+            tb_writer.add_scalar("loss/train_total", float(train_loss), ep)
+            tb_writer.add_scalar("loss/test_total", float(test_loss), ep)
+            tb_writer.add_scalar("accuracy/test_uebungstyp", float(acc_k / 100.0), ep)
+            tb_writer.add_scalar("accuracy/test_katalog", float(acc_kat / 100.0), ep)
+            tb_writer.add_scalar("epoch/acc_test_uebungstyp_pct", float(acc_k), ep)
+            tb_writer.add_scalar("epoch/acc_test_katalog_pct", float(acc_kat), ep)
             lr = optimizer.param_groups[0]["lr"]
-            tb_writer.add_scalar("optim/lr", lr, tb_step)
+            tb_writer.add_scalar("optim/lr", float(lr), ep)
             tb_writer.flush()
 
         # Checkpoint speichern wenn bestes Modell
@@ -479,6 +584,9 @@ def main():
                 "epoch": epoch,
                 "arch": arch,
                 "data_path": os.path.abspath(str(args.data)),
+                "split_seed": args.split_seed,
+                "test_user_ids": None if test_eval_is_train else sorted(test_users),
+                "degenerate_test_is_train": test_eval_is_train,
                 "m1": m1.state_dict(),
                 "m2": m2.state_dict(),
                 "m3": m3.state_dict(),
