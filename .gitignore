@@ -1,30 +1,47 @@
-# Lokale Secrets / persönliche Slurm-Generierung
+# ─── Lokale Secrets & generierte Slurm-Datei ─────────────────────────────────
 .env
+.env.local
 job.slurm
+*.swp
+*.swo
 
-# Python
+# ─── Python ─────────────────────────────────────────────────────────────────
 .venv/
 venv/
+guitarai_env/
 __pycache__/
 *.py[cod]
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
-# Training / große Artefakte
+# ─── Training / Checkpoints ────────────────────────────────────────────────
 checkpoints/
-runs/**/events.out.tfevents.*
 *.pt
 *.pth
+*.ckpt
 
-# Binaries / Zips vom Rechner
+# ─── TensorBoard: alles unter runs/ außer der erklärenden README ────────────
+runs/*
+!runs/README.txt
+
+# ─── SLURM / lokale Logs ────────────────────────────────────────────────────
+logs/
+*.log
+
+# ─── Große / synthetische Datensätze (Generator-Skript bleibt im Repo) ──────
+data/*.csv
+data/*.json
+
+# ─── Sonstiges ──────────────────────────────────────────────────────────────
 Archive.zip
-
-# Editor
 .DS_Store
 .idea/
 .vscode/
-
-# Optional: große synthetische Datensätze nicht mitversionieren
-# data/full_dataset_20k.csv
-# data/leo_50_sessions.csv
-# data/leo_50_sessions.json
