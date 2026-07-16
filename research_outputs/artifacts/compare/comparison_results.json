@@ -1,0 +1,35 @@
+{
+  "data": {
+    "csv_rows": 20000,
+    "users_total": 400,
+    "users_pretrain": 240,
+    "users_incremental": 80,
+    "users_test": 80,
+    "training_samples_pretrain": 10800,
+    "training_samples_test": 3600,
+    "seq_len": 5,
+    "features": 17
+  },
+  "results": [
+    {
+      "arch": "RNN ohne EWC",
+      "acc_katalog": 47.91666666666667,
+      "loss": 1.588043175439919
+    },
+    {
+      "arch": "RNN mit EWC",
+      "acc_katalog": 47.69444444444444,
+      "loss": 1.5585868158171663
+    },
+    {
+      "arch": "LSTM mit EWC",
+      "acc_katalog": 48.77777777777778,
+      "loss": 1.5551836627774533
+    },
+    {
+      "arch": "GRU mit EWC",
+      "acc_katalog": 49.083333333333336,
+      "loss": 1.5497301363312037
+    }
+  ]
+}

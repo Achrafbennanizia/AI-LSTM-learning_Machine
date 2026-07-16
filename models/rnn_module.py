@@ -1,8 +1,8 @@
-"""GRU — wie LSTM, aber etwas leichter."""
+"""Vanilla RNN — liest die letzten Sessions und sagt Fehlerraten voraus."""
 import torch.nn as nn
 
 
-class VerhaltensGRU(nn.Module):
+class VerhaltensRNN(nn.Module):
     def __init__(
         self,
         input_dim=17,
@@ -13,7 +13,7 @@ class VerhaltensGRU(nn.Module):
         out_dim=5,
     ):
         super().__init__()
-        self.gru = nn.GRU(input_dim, hidden_dim, n_layers, batch_first=True)
+        self.rnn = nn.RNN(input_dim, hidden_dim, n_layers, batch_first=True)
         self.drop = nn.Dropout(dropout)
         self.fc_head = nn.Sequential(
             nn.Linear(hidden_dim, head_hidden),
@@ -24,6 +24,6 @@ class VerhaltensGRU(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        out, h_n = self.gru(x)
+        out, h_n = self.rnn(x)
         last = self.drop(out[:, -1, :])
         return self.sigmoid(self.fc_head(last)), h_n[-1]

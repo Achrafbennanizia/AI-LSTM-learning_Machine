@@ -1,0 +1,22 @@
+[
+  {
+    "arch": "RNN_noewc",
+    "baseline_acc": 44.1025641025641,
+    "final_acc": 46.666666666666664
+  },
+  {
+    "arch": "RNN_ewc",
+    "baseline_acc": 42.22222222222222,
+    "final_acc": 41.02564102564102
+  },
+  {
+    "arch": "LSTM_ewc",
+    "baseline_acc": 42.05128205128205,
+    "final_acc": 44.27350427350427
+  },
+  {
+    "arch": "GRU_ewc",
+    "baseline_acc": 39.48717948717949,
+    "final_acc": 41.53846153846154
+  }
+]

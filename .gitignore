@@ -1,7 +1,7 @@
 # ─── Lokale Secrets & generierte Slurm-Datei ─────────────────────────────────
 .env
 .env.local
-job.slurm
+job_research.slurm
 *.swp
 *.swo
 
@@ -22,32 +22,25 @@ build/
 .coverage
 htmlcov/
 
-# ─── Training / Checkpoints ────────────────────────────────────────────────
-checkpoints/
-*.pt
-*.pth
-*.ckpt
-
 # ─── TensorBoard / Forschung (research_outputs) ────────────────────────────
-runs/*
-!runs/README.txt
+research_outputs/tensorboard/
 research_outputs/*
-!research_outputs/README.txt
-# Legacy-Pfade (optional weiter nutzbar)
-runs_compare/
-runs_forgetting/
-checkpoints_compare/
-checkpoints_forgetting/
-
+!research_outputs/README.md
+!research_outputs/artifacts/
+research_outputs/artifacts/*
+!research_outputs/artifacts/compare/
+!research_outputs/artifacts/forgetting/
+!research_outputs/artifacts/**/*.json
 # ─── SLURM / lokale Logs ────────────────────────────────────────────────────
-logs/
-*.log
+logs/*
+!logs/.gitkeep
 
 # ─── Große / synthetische Datensätze (Generator-Skript bleibt im Repo) ──────
 data/*.csv
 data/*.json
 
 # ─── Sonstiges ──────────────────────────────────────────────────────────────
+checkpoints/
 Archive.zip
 .DS_Store
 .idea/

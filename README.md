@@ -2,7 +2,7 @@
 
 Deep-Learning-Projekt zur **Auswertung von Übungssessions am E-Gitarrentrainer Leo**: Aus einer kurzen **Historie aufeinanderfolgender Sessions** werden (1) die erwarteten **Fehlerraten** der nächsten Session vorhergesagt, (2) der **Übungstyp** klassifiziert und (3) eine **Konkretübung aus dem Übungs-Katalog** ausgewählt.
 
-Das Training läuft **lokal** (CPU/GPU) und auf einem **Linux-HPC unter Slurm** (z. B. HiPerGOS/OS).
+Experimente laufen **lokal** (CPU/GPU) und auf einem **Linux-HPC unter Slurm**.
 
 ---
 
@@ -10,22 +10,24 @@ Das Training läuft **lokal** (CPU/GPU) und auf einem **Linux-HPC unter Slurm** 
 
 | Komponente | Rolle |
 |------------|--------|
-| **VerhaltensLSTM** (`models/lstm_module.py`) | Sequenzmodell über die letzten `seq_len` Sessions (aktuell Standard: **5**) mit **17** Merkmalen pro Session; gibt Fehlerratenvorschau (**σ**) und den letzten versteckten Zustand aus. |
-| **UebungstypClassifier** (`models/classifier_module.py`) | MLP auf `[Vorhersage (5), Hidden]` → **5 Übungstypen**. |
-| **KatalogMatcher** (`models/katalog_matcher.py`) | Zwei Encoder (Query aus Fehlerratenvorschage + Übungstyp-Wahrscheinlichkeiten vs. feste **Katalogmerkmale**); Auswahl unter **15** Katalog-Einträgen über Ähnlichkeit / Scores. |
+| **VerhaltensRNN** (`models/rnn_module.py`) | **M1**-Variante: Vanilla RNN + MLP-Kopf |
+| **VerhaltensLSTM / GRU** (`models/lstm_module.py`, `gru_module.py`) | **M1**-Varianten mit LSTM/GRU-Gedächtnis |
+| **UebungstypClassifier** (`models/classifier_module.py`) | **M2** — MLP auf `[Vorhersage (5), Hidden]` → **5 Übungstypen** |
+| **KatalogMatcher** (`models/katalog_matcher.py`) | **M3** — Auswahl unter **15** Katalog-Einträgen |
 
-Verluste: MSE auf Fehlerratenziele, Cross-Entropy für Übungstyp und Katalog. Optional wirkt **EWC** (Elastic Weight Consolidation) gegen katastrophisches Vergessen mit.
-
-Checkpoints unter `checkpoints/best_model.pt` speichern u. a. `arch`, Gewichte (`m1`–`m3`) und den **Pfad zur Trainings-CSV** (`data_path`), damit `evaluate.py` dieselbe Datenbasis referenzieren kann.
+Verluste: MSE auf Fehlerratenziele, Cross-Entropy für Übungstyp und Katalog. **EWC** und **Experience Replay** gegen katastrophales Vergessen (`research/incremental_engine.py`).
 
 ---
 
 ## Daten
 
-- Erwartete Spalten u. a.: `nutzer_id`, `session`, die **17** Merkmale in `FEATURE_COLS` (definiert in `train.py`), `uebungstyp_label`, `empfehlung_id` (Katalog-ID wie in `katalog_matcher.KATALOG_IDS`).
-- **Große CSV/JSON-Dateien** werden per `.gitignore` nicht versioniert. Stattdessen liegt ein **Generator-Skript** in `data/leo_story_generator.py` — damit lässt sich z. B. ein mehrnutzeriges Set wie `full_dataset_20k.csv` erzeugen (siehe Kommentare in `job.slurm.template`).
-- Datenpfad:
-  - Umgebungsvariable **`GUITARAI_DATA`** (Datei oder Verzeichnis mit `leo_50_sessions.csv`) bzw. **`GUITARAI_DATA_DIR`**, sonst Fallback siehe `paths.py` und `./data/`.
+- **17 Features** in `FEATURE_COLS` (`training_common.py`), plus `uebungstyp_label`, `empfehlung_id`
+- Generator: `data/generate_data_v3.py` → z. B. `data/leo_sessions_v3.csv`
+- Split für Forschung: 60/20/20 (Pretrain / Inkrementell / Test)
+
+```bash
+python data/generate_data_v3.py --users-per-type 80,80,80,80,80 --sessions 50
+```
 
 ---
 
@@ -33,63 +35,42 @@ Checkpoints unter `checkpoints/best_model.pt` speichern u. a. `arch`, Gewichte
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Training (Standardeinstellungen siehe Hilfe):
-
 ```bash
-python train.py --help
-python train.py --data pfad/zur.csv
+python research/train_compare.py --data data/leo_sessions_v3.csv
+python research/benchmark_forgetting.py --data data/leo_sessions_v3.csv
 ```
 
-Evaluation (lädt standardmäßig `checkpoints/best_model.pt`):
+TensorBoard: `research_outputs/tensorboard/` — siehe `research_outputs/README.md`.
 
-```bash
-python evaluate.py
-```
-
-**TensorBoard:** Events liegen unter `runs/<Zeitstempel>/`. Hinweise zu `--samples_per_plugin` und IPv4-Binding stehen in `runs/README.txt`.
+**AI-assisted code:** `docs/AI_CODE_ATTRIBUTION.md` (prompts under `docs/ai_prompts/`).
 
 ---
 
 ## Hochleistungsrechner (Slurm)
 
-1. `.env.example` nach **`.env`** kopieren und **partition, account, Mail, GPU-`gres`**, Limits etc. eintragen (`.env` ist gitignored).
-2. Job-Script erzeugen:
-
-   ```bash
-   python3 scripts/render_job_slurm.py
-   ```
-
-   Ausgabe: **`job.slurm`** im Projektroot (ebenfalls gitignored, falls persönlich).
-3. Auf dem Login-Node: Repo/venv bereitstellen, ggf. `full_dataset_20k.csv` generieren, dann:
-
-   ```bash
-   sbatch job.slurm
-   ```
-
-Das Template enthält konkrete `train.py`-Argumente (u. a. Epochen, LR, Hidden-Größen); siehe **`job.slurm.template`**.
+1. `.env.example` → `.env` (Partition, Account, GPU-`gres`, Mail)
+2. `python3 scripts/render_job_slurm.py` → `job_research.slurm`
+3. Auf dem Login-Node: `sbatch job_research.slurm`
 
 ---
 
-## Projektstruktur (Kern)
+## Projektstruktur
 
 ```
-train.py           # Training, Dataset, Checkpointing, TensorBoard
-evaluate.py        # Confusion Matrix, Reports, kleine Demo
-paths.py           # Auflösung CSV-Pfad über Env/Defaults
-models/            # LSTM, GRU, MLP-Kopf, DQN, Classifier, Katalogmatcher
-scripts/render_job_slurm.py   # `.env` + `job.slurm.template` → `job.slurm`
-data/leo_story_generator.py   # Synthetische / skalierbare Datensatz-Erzeugung
-research/          # Forschung: Vergleich, Forgetting, io_layout
-research_outputs/  # (gitignored außer README) TB + Artefakte + CSV-Exporte
+training_common.py    # FEATURE_COLS, Dataset, Modelle, Loss, Eval
+models/               # RNN, LSTM, GRU, Classifier, Katalogmatcher
+data/generate_data_v3.py
+research/             # Architekturvergleich, Forgetting-Benchmark
+  incremental_engine.py
+  train_compare.py
+  benchmark_forgetting.py
+scripts/render_job_slurm.py
+job_research.slurm.template
+research_outputs/     # (gitignored) TensorBoard + JSON-Artefakte
 ```
 
-**Forschung:** `research/README_research.md` — Architekturvergleich, Forgetting, zentrale Ausgabe unter `research_outputs/`.
-
-## Referenz-Konventionen
-
-- **Architektur-Defaults** in `train.py` (u. a. `hidden=64`, `lstm_layers=1`, `batch_size=32`, `lr=5e-4`) sind auf ein kompaktes Modell (**~116k** trainierbare Parameter für `m1`+`m2`+`m3` bei Default-Katalogkopf; exakte Zahl wird beim Trainingsstart ausgegeben).
-- Schlüsselinvariante: Änderungen an **`FEATURE_COLS`** / Ein-/Ausgabedimensionen erfordern abgestimmte Anpassungen in Modellen und ggf. neues Training; alte Checkpoints sind dann nicht ohne Weiteres kompatibel.
+Details: `research/README_research.md`
